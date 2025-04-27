@@ -1,0 +1,819 @@
+import random
+from collections import deque
+from abc import ABC, abstractmethod
+import sqlite3
+import pandas as pd
+import matplotlib.pyplot as plt
+import os
+
+# Abstract bas class 
+class Entity(ABC):
+    """
+    Abstrakt basklass för alla entiteter i systemet.
+
+    Denna klass definierar den gemensamma strukturen för alla objekt som representerar
+    entiteter i simuleringen. Alla konkreta klasser bör ärva från Entity och implementera
+    sin egen __init__-metod för att initiera nödvändiga attribut.
+    """
+    @abstractmethod
+    def __init__(self):
+        pass
+
+# Abstract base class för resources
+class Resource(Entity, ABC):
+    """
+Abstrakt bas-klass för resurser i simuleringen.
+
+Representerar en generell resurs med ett numeriskt värde som kan modifieras.
+Alla specifika resurstyper (t.ex. Life, Food, Product) bör ärva från denna klass
+och implementera metoden modify_value för att definiera hur värdet förändras.
+
+Args:
+    value (float): Det initiala värdet för resursen (standardvärde är 0.0).
+
+Attributes:
+    _value (float): Resursens aktuella värde.
+    """
+    def __init__(self, value: float = 0.0):
+        super().__init__()
+        self._value = value
+
+    def get_value(self) -> float:
+        return self._value
+
+    @abstractmethod
+    def modify_value(self, amount: float):
+        pass
+
+#  resource classes
+class Life(Resource):
+    """
+    Representerar en livsresurs (hälsa) för en entitet.
+
+    Denna klass hanterar hälsa genom att lagra ett värde mellan 0 och 100. Metoden
+    modify_value säkerställer att värdet aldrig överskrider dessa gränser genom att
+    begränsa resultatet inom intervallet [0, 100].
+
+    Args:
+     life (float): Startvärde för hälsa. Standardvärde är 100.0.
+    """
+    def __init__(self, life: float = 100.0):
+        super().__init__(value=life)
+
+    def modify_value(self, amount: float):
+        self._value = min(100, max(0, self._value + amount))
+
+class Food(Resource):
+    """
+    Representerar en matresurs med en kvalitetsnivå i simuleringen.
+
+    Klassen hanterar matresurser genom att lagra ett kvalitetsvärde som kan modifieras.
+    Detta kan exempelvis användas för att simulera matens färskhet eller näringsinnehåll.
+
+    Args:
+        quality (float): Startvärde för matens kvalitet. Standardvärde är 50.0.
+
+    Attributes:
+        _value (float): Det aktuella kvalitetsvärdet för maten.
+    """
+    def __init__(self, quality: float = 50.0):
+        super().__init__(value=quality)
+
+    def modify_value(self, amount: float):
+        self._value += amount
+
+class Product(Resource):
+    """
+    Representerar en produktresurs i simuleringen.
+
+    Denna klass hanterar produkter som kan användas för att påverka hälsan hos en worker,
+    t.ex. genom att återställa liv. Den ärver från Resource, men tillför dessutom produkt-specifika
+    attribut som namn och healing_value.
+
+    Args:
+        name (str): Namnet på produkten. Standardvärde är "Health Product".
+        healing_value (float): Den mängd hälsa produkten kan återställa. Standardvärde är 5.0.
+
+    Attributes:
+        _value (float): Ett internt värde ärvt från Resource (standardinställt till 1.0).
+        name (str): Produktens namn.
+        healing_value (float): Anger hur mycket produkten bidrar med för att återställa hälsa.
+
+    Methods:
+        modify_value(amount: float):
+            Modifierar det interna värdet med ett specificerat belopp.
+        __repr__():
+            Returnerar en strängrepresentation av produktens namn och healing_value.
+    """
+    def __init__(self, name: str = "Health Product", healing_value: float = 5.0):
+        super().__init__(value=1.0)
+        self.name = name
+        self.healing_value = healing_value
+
+    def modify_value(self, amount: float):
+        self._value += amount
+
+    def __repr__(self):
+        return f"Product(name={self.name}, healing_value={self.healing_value})"
+
+class Place(Entity, ABC):
+    """
+    Abstrakt basklass för platser i simuleringen.
+
+    Denna klass representerar en plats där workers kan hanteras, exempelvis genom att lagras,
+    flyttas eller bearbetas. Alla konkreta platsklasser bör ärva från Place och implementera
+    metoderna add_worker och get_worker för att definiera hur workers läggs till respektive hämtas.
+
+    Attribut:
+        _workers (deque): En FIFO-kö som lagrar worker-objekt.
+
+    Metoder:
+        add_worker(worker):
+            Abstrakt metod som ska implementeras för att lägga till en worker på platsen.
+        get_worker():
+            Abstrakt metod som ska implementeras för att hämta en worker från platsen.
+        worker_amount() -> int:
+            Returnerar antalet workers som för närvarande finns lagrade på platsen.
+    """
+    def __init__(self):
+        super().__init__()
+        self._workers = deque()
+
+    @abstractmethod
+    def add_worker(self, worker):
+        pass
+
+    @abstractmethod
+    def get_worker(self):
+        pass
+
+    def worker_amount(self) -> int:
+        return len(self._workers)
+
+#  place classes
+class Barrack(Place):
+    """
+    En barack (Barrack) är en plats där arbetare kan vänta.
+
+    Ärver från:
+        Place: En abstrakt plats som kan lagra och hantera workers.
+
+    Funktionalitet:
+        - add_worker(worker): Lägger till en worker (av typen Worker) i kön om den är vid liv.
+        - get_worker(): Hämtar och tar bort den worker som kom först (FIFO). Returnerar None om kön är tom.
+
+    Attribut:
+        _workers (deque): En FIFO-kö av Worker-objekt.
+    """
+    def add_worker(self, worker):
+        if worker and worker.is_alive():
+            self._workers.append(worker)
+
+    def get_worker(self):
+        if self._workers:
+            return self._workers.popleft()
+        return None
+
+
+class Warehouse(Place):
+    """
+    Ett lager (Warehouse) är en plats där alla produktresurser förvaras.
+
+    Ärver från:
+        Place: En abstrakt plats som hanterar workers, även om Warehouse inte lagrar workers.
+
+    Funktionalitet:
+        - product_amount(): Returnerar antalet produkter som finns i lagret.
+        - add_product(product): Lägger till en produkt i lagret.
+        - send_product(): Hämtar och tar bort en produkt från lagret. Om inga produkter finns, skrivs en varning ut.
+
+    Attribut:
+        _products (deque): En FIFO-kö med produktobjekt.
+    """
+    def __init__(self):
+        super().__init__()
+        self._products = deque()
+
+    def add_worker(self, worker):
+        pass  # Warehouses don't store workers
+
+    def get_worker(self):
+        return None
+
+    def product_amount(self) -> int:
+        return len(self._products)
+
+    def add_product(self, product):
+        self._products.append(product)
+
+    def send_product(self):
+        if self._products:
+            return self._products.pop()
+        print("Warning: No products available in the warehouse!")
+        return None
+
+class Barn(Place):
+    """
+    Ett lador (Barn) är en plats där all mat (Food) förvaras i simuleringen.
+
+    Ärver från:
+        Place: En abstrakt plats som hanterar workers (även om Barn inte aktivt lagrar workers).
+
+    Funktionalitet:
+        - add_food(food): Lägger till en food-resurs i ladan.
+        - send_food(): Hämtar och tar bort den äldsta food-resursen (FIFO). Om ladan är tom skrivs en varning ut.
+        - food_amount(): Returnerar antalet food-resurser som finns i ladan.
+
+    Attribut:
+        _food (deque): En FIFO-kö som lagrar food-objekt.
+    """
+    def __init__(self):
+        super().__init__()
+        self._food = deque()
+
+    def add_worker(self, worker):
+        pass
+
+    def get_worker(self):
+        return None
+
+    def add_food(self, food):
+        self._food.append(food)
+
+    def send_food(self):
+        if self._food:
+            return self._food.popleft()
+        else:
+            print("Warning: No food left in the barn!")
+            return None
+
+    def food_amount(self):
+        return len(self._food)
+
+# Abstract base class för transitions
+class Transition(Entity, ABC):
+    """
+    Abstrakt basklass för övergångar i simuleringen.
+
+    Denna klass representerar en process eller övergång som hanterar flödet mellan olika delar
+    av simuleringen, exempelvis att flytta workers, producera resurser eller modifiera entiteternas tillstånd.
+    Varje specifik övergång (t.ex. Factory, Field, FoodCourt) ska ärva från denna klass och implementera
+    metoden process för att definiera sitt unika beteende.
+
+    Metoder:
+        process(*args, **kwargs):
+            Abstrakt metod som ska implementeras i subklasser för att definiera övergångens logik.
+    """
+    def __init__(self, *args, **kwargs):  
+        super().__init__()
+
+    @abstractmethod
+    def process(self, *args, **kwargs):
+        pass
+
+#  transition classes
+class Factory(Transition):
+    """
+    Fabrikövergången (Factory) i simuleringen.
+
+    Denna klass hanterar processen där arbetare (workers) från en ingångsbarack bearbetas för att producera produkter.
+    Under processen tillämpas en slumpmässig skada på varje worker. Om en worker överlever skadan produceras en produkt
+    och workern flyttas till en utgångsbarack. Om en worker dör registreras detta i analytics.
+
+    Args:
+        barrack_in (Barrack): Ingångsbaracken från vilken workers hämtas.
+        warehouse_out (Warehouse): Lagret där de producerade produkterna lagras.
+        barrack_out (Barrack): Utgångsbaracken dit överlevande workers flyttas.
+
+    Metoder:
+        process(analytics, logger, step):
+            Utför fabrikens process under en simuleringsdag. Processen innebär att varje worker får slumpmässig skada,
+            och beroende på om workern överlever, produceras en produkt och workern flyttas till utgångsbaracken.
+            Statistik över producerade produkter och döda workers uppdateras även.
+    """
+    def __init__(self, barrack_in, warehouse_out, barrack_out):
+        super().__init__()
+        self._barrack_in = barrack_in
+        self._warehouse_out = warehouse_out
+        self._barrack_out = barrack_out
+
+    def process(self, analytics, logger, step):
+        '''Factory process där produkter görs om och endast bara om worker är alive'''
+        total_products_produced = 0
+        workers_died = 0
+
+        while self._barrack_in.worker_amount() > 0:
+            worker = self._barrack_in.get_worker()
+            damage = random.uniform(0, 10.5)
+            worker.remove_life(damage)
+
+            if worker.is_alive():
+                for _ in range(1):
+                    product = Product()
+                    self._warehouse_out.add_product(product)
+                    total_products_produced += 1
+                    analytics.increment_total_products()
+                self._barrack_out.add_worker(worker)
+            else:
+                workers_died += 1
+                analytics.increment_dead_workers()
+
+        # Daily summary clearly printed once per day
+        print(f"Factory Summary Day {step + 1}: Produced {total_products_produced} products, {workers_died} workers died.")
+
+class Field(Transition):
+    """
+    Field-övergången i simuleringen.
+
+    Denna klass representerar processen där mat produceras på ett fält. Workers
+    från en ingångsbarrack (barrack_in) bearbetas: de får en slumpmässig skada, och om
+    de överlever, odlas mat med en slumpmässig kvalitetsnivå som sedan lagras i ladan (barn_out).
+    Överlevande workers flyttas vidare till en utgångsbarrack (barrack_out), medan döda workers
+    registreras i simuleringens statistik.
+
+    Args:
+        barrack_in (Barrack): Ingångsbarrack där workers hämtas.
+        barrack_out (Barrack): Utgångsbarrack dit överlevande workers flyttas.
+        barn_out (Barn): Ladan där den producerade maten lagras.
+
+    Metoder:
+        process(analytics, logger, step):
+            Utför fältets process under en simuleringsdag. Varje worker får en slumpmässig
+            skada och producerar mat om den överlever. Statistik över producerad mat och
+            döda workers uppdateras, och dagliga sammanfattningar skrivs ut.
+    """
+    def __init__(self, barrack_in, barrack_out, barn_out):
+        super().__init__()
+        self._barrack_in = barrack_in
+        self._barrack_out = barrack_out
+        self._barn_out = barn_out
+
+    def process(self, analytics, logger, step):
+        '''Food tillverks här bara endast om worker är alive'''
+        workers_died = 0
+        food_produced = 0
+
+        while self._barrack_in.worker_amount() > 0:
+            worker = self._barrack_in.get_worker()
+            damage = random.uniform(0, 10.5)
+            worker.remove_life(damage)
+
+            if worker.is_alive():
+                food_quality = random.uniform(40, 100)  # Realistic food quality
+                for _ in range(random.choice([1,3])):
+                    
+                    self._barn_out.add_food(Food(food_quality))
+                    analytics.increment_total_food()
+                    food_produced += 1
+                self._barrack_out.add_worker(worker)
+            else:
+                workers_died += 1
+                analytics.increment_dead_workers()
+                
+
+
+        if food_produced > 0:
+            print(f"- Produced {food_produced} food today.")
+        if workers_died > 0:
+            print(f"- {workers_died} workers died today in the field.")
+
+
+class FoodCourt(Transition):
+    """
+    Matcentralen (FoodCourt) i simuleringen.
+
+    Denna klass representerar en process där arbetare (workers) får äta mat.
+    Beroende på matkvaliteten kan en worker antingen återfå hälsa eller ta skada.
+    Efter att ha ätit flyttas workern från ingångsbarracken till utgångsbarracken.
+    Simuleringen uppdaterar statistik för både helande och skada baserat på serverad mat.
+
+    Args:
+        barrack_in (Barrack): Ingångsbarracken där workers hämtas.
+        barrack_out (Barrack): Utgångsbarracken dit workers flyttas efter att ha ätit.
+        barn_in (Barn): Ladan som innehåller maten som används vid serveringen.
+
+    Metoder:
+        process(analytics, logger, step):
+            Utför processen där workers får äta mat. Beroende på matkvaliteten
+            antingen återfår de hälsa eller tar skada. Statistik uppdateras och en
+            daglig sammanfattning skrivs ut.
+    """
+    def __init__(self, barrack_in, barrack_out, barn_in):
+        super().__init__()
+        self._barrack_in = barrack_in
+        self._barrack_out = barrack_out
+        self._barn_in = barn_in
+
+    def process(self, analytics, logger, step):
+        '''där workers antingen bli förgiftade eller heald'''
+        workers_healed = 0
+        workers_harmed = 0
+        total_healed = 0
+        total_harmed = 0
+
+        while self._barrack_in.worker_amount() > 0 and self._barn_in.food_amount() > 0:
+            worker = self._barrack_in.get_worker()
+            
+             
+           
+            one_or_two_meal = random.choice([1,2])
+            for meal in range(one_or_two_meal):
+                food = self._barn_in.send_food() 
+                if food:       
+                    quality = food.get_value()
+
+                    if quality < 50:
+                        damage = (50 - quality) * 0.2
+                        worker.remove_life(damage)
+                        workers_harmed += 1
+                        total_harmed += damage
+                
+                    else:
+                        heal_amount = quality * 0.1
+                        
+                        worker.add_life(heal_amount)
+                    
+                        workers_healed += 1
+                        total_healed += heal_amount
+                        
+
+
+            self._barrack_out.add_worker(worker)
+
+        
+
+
+        # Clearly printed summary 
+        print(f"FoodCourt Summary Day {step + 1}: Workers healed={workers_healed}, Workers harmed={workers_harmed}, Total healed={total_healed:.1f}, Total damage={total_harmed:.1f}")
+
+    
+
+class Home(Place):
+    """
+    Hemmet (Home) är en plats i simuleringen där workers får möjlighet att återhämta sig och reproducera sig.
+    
+    Home hanterar inte workers direkt (add_worker och get_worker är inte implementerade), utan fungerar
+    som en "aktivitetspunkt" där workers:
+      - vilar genom att konsumera produkter från ett lager (Warehouse), vilket återställer deras hälsa,
+      - har roligt (fun_time) vilket kan leda till att nya workers skapas (reproduktion).
+
+    Args:
+        barrack_in (Barrack): Ingångsbarracken från vilken workers hämtas.
+        barrack_out (Barrack): Utgångsbarracken dit workers skickas efter att ha genomfört aktiviteter.
+        warehouse_in (Warehouse): Lagret med produkter som används för att återställa workers hälsa
+        eller för att möjliggöra reproduktion.
+    """
+    def __init__(self, barrack_in, barrack_out, warehouse_in):
+        super().__init__() 
+        self._barrack_in = barrack_in
+        self._barrack_out = barrack_out
+        self._warehouse_in = warehouse_in
+
+    def add_worker(self, worker):
+        """ Home does not store workers, so do nothing """
+        pass  
+
+    def get_worker(self):
+        """ Home does not store workers, so return None """
+        return None  
+    
+    def rest(self, analytics):
+        '''Worker vilar och consumerar ett produkt'''
+        workers_resting = 0
+        while self._barrack_in.worker_amount() > 0 and self._warehouse_in.product_amount() > 0:
+            worker = self._barrack_in.get_worker()
+            product = self._warehouse_in.send_product()
+            if worker and product:
+                worker.add_life(product.healing_value)
+                self._barrack_out.add_worker(worker)
+                workers_resting += 1
+        if workers_resting > 0:
+            print(f"- {workers_resting} workers rested and consumed products.")
+
+
+    def fun_time(self, analytics):
+        """funtime för att föröka sig """
+        new_workers_created = 0
+
+        while self._barrack_in.worker_amount() >= 2 and self._warehouse_in.product_amount() > 0:
+            worker1 = self._barrack_in.get_worker()
+            worker2 = self._barrack_in.get_worker()
+
+            if (worker1 and worker2 and worker1.is_alive() and worker2.is_alive() and 
+                random.random() < 0.3):  #  chance of reproduction
+                new_worker = Worker(life=50.0)
+                self._barrack_out.add_worker(new_worker)  # Add to output barrack
+                new_workers_created += 1
+                product = self._warehouse_in.send_product()
+
+            self._barrack_out.add_worker(worker1)
+            self._barrack_out.add_worker(worker2)
+
+        if new_workers_created > 0:
+            print(f"- {new_workers_created} new workers were created during fun time.")
+
+
+# Worker class
+class Worker(Entity):
+    """
+    Representerar en arbetare i simuleringen.
+
+    En worker är en entitet som utför uppgifter, kan reproducera sig och kan dö om dess hälsa når noll.
+    Hälsan hanteras genom en Life-resurs, vilket gör att worker kan ta skada eller återhämta sig.
+
+    Args:
+        life (float): Initialt hälsovärde för workern. Standardvärde är 100.0.
+
+    Metoder:
+        is_alive() -> bool:
+            Returnerar True om workerns hälsa är över 0, annars False.
+        add_life(amount: float):
+            Ökar workerns hälsa med angivet belopp.
+        remove_life(amount: float):
+            Minskar workerns hälsa med angivet belopp.
+    """
+    def __init__(self, life: float = 100.0):
+        super().__init__()
+        self._life = Life(life)
+
+    def is_alive(self) -> bool:
+        return self._life.get_value() > 0
+
+    def add_life(self, amount: float):
+        self._life.modify_value(amount)
+    
+    def remove_life(self, amount: float):
+        self._life.modify_value(-amount)
+
+
+# Analytics for tracking the simulation
+class Analytics:
+    """
+    Analytics-klass för att spåra statistik i simuleringen.
+
+    Denna klass hanterar statistikdata under simuleringen, såsom antalet döda workers,
+    totalt producerade produkter och totalt producerad mat.
+
+    Attribut:
+        dead_workers (int): Totalt antal döda workers.
+        total_products_produced (int): Totalt antal producerade produkter.
+        total_food_produced (int): Totalt antal producerad mat.
+
+    Metoder:
+        increment_dead_workers():
+            Ökar antalet döda workers med 1.
+        increment_total_products():
+            Ökar antalet producerade produkter med 1.
+        increment_total_food():
+            Ökar antalet producerad mat med 1.
+        display_statistics():
+            Skriver ut den sammanlagda statistiken för simuleringen.
+    """
+    def __init__(self):
+        self.dead_workers = 0
+        self.total_products_produced = 0
+        self.total_food_produced = 0
+
+    def increment_dead_workers(self):
+        self.dead_workers += 1
+
+    def increment_total_products(self):
+        self.total_products_produced += 1
+
+    def increment_total_food(self):
+        self.total_food_produced += 1
+
+    def display_statistics(self):
+        print("\n--- Simulation Statistics ---")
+        print(f"Total Dead Workers: {self.dead_workers}")
+        print(f"Total Products Produced: {self.total_products_produced}")
+        print(f"Total Food Produced: {self.total_food_produced}")
+
+# Database Logger
+class DatabaseLogger:
+    """
+    Hanterar loggning av simuleringen till en SQLite-databas.
+
+    Denna klass tar hand om att skapa (och vid behov radera en befintlig) databas,
+    skapa nödvändiga tabeller samt logga simuleringens data (såsom antal workers, produkter och mat)
+    per simuleringssteg.
+
+    Args:
+        db_name (str): Namnet på databasen. Standardvärde är "simulation.db".
+
+    Attribut:
+        conn (sqlite3.Connection): Anslutningen till SQLite-databasen.
+        cursor (sqlite3.Cursor): Cursor för att utföra SQL-kommandon.
+    
+    Metoder:
+        _create_table():
+            Skapar tabellen "simulation_data" om den inte redan finns.
+        log_data(step, workers, products, food):
+            Loggar ett simuleringssteg med angivet antal workers, produkter och mat.
+        close():
+            Stänger databasanslutningen.
+    """
+    def __init__(self, db_name="simulation.db"):
+        
+        if os.path.exists(db_name):
+            os.remove(db_name)
+            print(f" Old database deleted: {db_name}")
+
+        
+        self.conn = sqlite3.connect(db_name)
+        self.cursor = self.conn.cursor()
+        self._create_table()
+
+    def _create_table(self):
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS simulation_data (
+                step INTEGER,
+                workers INTEGER,
+                products INTEGER,
+                food INTEGER
+            )
+        """)
+        self.conn.commit()
+
+    def log_data(self, step, workers, products, food):
+        try:
+            self.cursor.execute("""
+                INSERT INTO simulation_data (step, workers, products, food) VALUES (?, ?, ?, ?)
+            """, (step, workers, products, food))
+            self.conn.commit()
+        except Exception as e:
+            print(f" Error logging data: {e}")
+
+    def close(self):
+        self.conn.close()
+
+# Excel Exporter
+class ExcelExporter:
+    """
+    Exporterar simuleringsdata från en SQLite-databas till en Excel-fil.
+
+    Denna klass hanterar exporten av data från databasen (där simuleringens steg loggats) till en Excel-fil.
+    Vid export kontrolleras om en tidigare fil finns, i så fall tas den bort innan den nya filen skapas.
+    Om inga data finns i databasen skrivs ett meddelande ut.
+
+    Args:
+        db_name (str): Namnet på databasen från vilken data hämtas. Standardvärde är "simulation.db".
+
+    Metoder:
+        export_to_excel(file_name="simulation_data.xlsx"):
+            Hämtar all data från tabellen 'simulation_data' och exporterar den till en Excel-fil.
+            Om filen redan existerar tas den bort innan export sker.
+        close():
+            Stänger databasanslutningen.
+    """
+    def __init__(self, db_name="simulation.db"):
+        self.conn = sqlite3.connect(db_name)
+
+    def export_to_excel(self, file_name="simulation_data.xlsx"):
+        try:
+            
+            if os.path.exists(file_name):
+                os.remove(file_name)
+                print(f" Old Excel file deleted: {file_name}")
+
+            
+            query = "SELECT * FROM simulation_data"
+            df = pd.read_sql_query(query, self.conn)
+
+            if df.empty:
+                print(" No data to export!")
+                return
+
+            
+            df.to_excel(file_name, index=False, engine='openpyxl')
+            print(f" New data exported successfully to {file_name}")
+
+        except Exception as e:
+            print(f" Error exporting data: {e}")
+
+        finally:
+            self.conn.close()
+
+    def close(self):
+        self.conn.close()
+
+# Visualizer
+class Visualizer:
+    """
+    Visualizer-klass för att plotta simuleringsdata.
+
+    Denna klass ansluter till en SQLite-databas där simuleringsdata lagras och genererar en graf som visar 
+    antalet workers, produkter och mat över simuleringssteg. Grafen sparas som "simulation_plot.png" och visas 
+    sedan med hjälp av matplotlib.
+
+    Args:
+        db_name (str): Namnet på databasen som innehåller simuleringsdata (standard: "simulation.db").
+
+    Metoder:
+        plot_data():
+            Hämtar data från databasen och ritar en graf över workers, produkter och mat per simuleringssteg.
+        close():
+            Stänger databasanslutningen.
+    """
+    def __init__(self, db_name="simulation.db"):
+        self.conn = sqlite3.connect(db_name)
+
+    def plot_data(self):
+        query = "SELECT step, workers, products, food FROM simulation_data"
+        df = pd.read_sql_query(query, self.conn)
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(df['step'], df['workers'], label='Workers')
+        plt.plot(df['step'], df['products'], label='Products')
+        plt.plot(df['step'], df['food'], label='Food', linestyle='--')
+        plt.xlabel('Simulation Step')
+        plt.ylabel('Quantity')
+        plt.title('Simulation Data')
+        plt.legend()
+        plt.grid(True)
+        plt.savefig("simulation_plot.png")
+        plt.show()
+
+    def close(self):
+        self.conn.close()
+
+if __name__ == "__main__":
+    # Initialize simulation clearly
+    main_barrack = Barrack()
+    processing_barrack = Barrack()
+    warehouse = Warehouse()
+    barn = Barn()
+    analytics = Analytics()
+    logger = DatabaseLogger()
+    
+    factory = Factory(main_barrack, warehouse, processing_barrack)
+    field = Field(main_barrack, processing_barrack, barn)
+    home = Home(main_barrack, processing_barrack, warehouse)
+    food_court = FoodCourt(main_barrack, processing_barrack, barn)
+
+    # Initial setup
+    for _ in range(10):
+        main_barrack.add_worker(Worker())
+
+    for _ in range(50):
+        warehouse.add_product(Product())
+
+    for _ in range(100):
+       barn.add_food(Food())
+
+    # Simulation loop for 20 days :
+    for day in range(20):
+        print(f"\n--- Day {day + 1} ---")
+
+        if main_barrack.worker_amount() == 0:
+            print("No workers left. Simulation ending.")
+            break
+
+        # Factory processing
+        factory.process(analytics, logger, day)
+        while processing_barrack.worker_amount() > 0:
+            main_barrack.add_worker(processing_barrack.get_worker())
+       
+        # Field processing
+        field.process(analytics, logger, day)
+        while processing_barrack.worker_amount() > 0:
+            main_barrack.add_worker(processing_barrack.get_worker())
+        
+        # FoodCourt processing
+        food_court.process(analytics, logger, day)
+        while processing_barrack.worker_amount() > 0:
+            main_barrack.add_worker(processing_barrack.get_worker())
+        
+        # Home activities
+        home.fun_time(analytics)
+        home.rest(analytics)
+        while processing_barrack.worker_amount() > 0:
+            main_barrack.add_worker(processing_barrack.get_worker())
+        # log alla data
+        logger.log_data(
+                    day,
+                    main_barrack.worker_amount(),
+                    warehouse.product_amount(),
+                    barn.food_amount()
+                )
+
+        # Daily summary:
+        print(f"Day {day + 1} Status: Workers={main_barrack.worker_amount()}, Products={warehouse.product_amount()}, Food={barn.food_amount()}")
+
+    
+    print("\n=== Final Statistics ===")
+    analytics.display_statistics()
+
+    # Logger stänger 
+    logger.close()
+
+    # Excel export and visualization 
+    exporter = ExcelExporter()
+    exporter.export_to_excel()
+    exporter.close()
+
+    visualizer = Visualizer()
+    visualizer.plot_data()
+    visualizer.conn.close()  #  close Visualizer
+
+
